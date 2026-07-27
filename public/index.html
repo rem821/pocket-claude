@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#141416" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>pocket-claude</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- Inline so the browser never requests /favicon.ico. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23141416'/%3E%3Cpath d='M20 44 32 18l12 26' stroke='%23c96442' stroke-width='6' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Cpath d='M25 36h14' stroke='%23c96442' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- Login -->
+    <section id="view-login" class="view">
+      <div class="login-box">
+        <h1>pocket-claude</h1>
+        <p class="muted">Enter the access token from <code>.env</code> on the host.</p>
+        <form id="login-form">
+          <input
+            id="login-token"
+            type="password"
+            inputmode="text"
+            autocomplete="current-password"
+            placeholder="Access token"
+            required
+          />
+          <button type="submit" class="primary">Unlock</button>
+        </form>
+        <p id="login-error" class="error" hidden></p>
+      </div>
+    </section>
+
+    <!-- Projects -->
+    <section id="view-projects" class="view" hidden>
+      <header class="bar">
+        <h1>Projects</h1>
+        <button id="project-new" class="icon" title="New project" aria-label="New project">＋</button>
+        <button id="projects-refresh" class="icon" title="Refresh" aria-label="Refresh">↻</button>
+      </header>
+      <div class="search-wrap">
+        <input id="project-search" type="search" placeholder="Filter projects…" autocomplete="off" />
+      </div>
+      <ul id="project-list" class="list"></ul>
+      <p id="project-empty" class="muted pad" hidden>No projects found.</p>
+    </section>
+
+    <!-- Sessions -->
+    <section id="view-sessions" class="view" hidden>
+      <header class="bar">
+        <button class="icon back" data-back="projects" aria-label="Back">‹</button>
+        <h1 id="sessions-title">Project</h1>
+      </header>
+      <div class="pad">
+        <button id="new-conversation" class="primary wide">＋ New conversation</button>
+        <p id="sessions-path" class="muted mono tiny"></p>
+      </div>
+      <ul id="session-list" class="list"></ul>
+      <p id="sessions-empty" class="muted pad" hidden>
+        No conversations here yet. Start one above.
+      </p>
+    </section>
+
+    <!-- Chat -->
+    <section id="view-chat" class="view chat" hidden>
+      <header class="bar">
+        <button class="icon back" data-back="sessions" aria-label="Back">‹</button>
+        <div class="bar-titles">
+          <h1 id="chat-title">Conversation</h1>
+          <span class="tiny muted status-line">
+            <span id="spinner" class="spin" hidden></span>
+            <span id="chat-status">connecting…</span>
+          </span>
+        </div>
+      </header>
+      <div class="chips">
+        <button id="chip-model" class="chip-btn" title="Model">model…</button>
+        <button id="chip-mode" class="chip-btn" title="Permission mode">Ask</button>
+      </div>
+      <div id="chat-scroll" class="scroll">
+        <button id="load-earlier" class="ghost wide" hidden>Load earlier messages</button>
+        <div id="messages"></div>
+      </div>
+      <footer class="composer">
+        <div id="slash-palette" class="palette" hidden></div>
+        <div id="attachments" class="attachments" hidden></div>
+        <div id="composer-notice" class="notice" hidden></div>
+        <input id="file-input" type="file" multiple hidden />
+        <div class="composer-row">
+          <button id="attach" class="icon attach" aria-label="Attach">📎</button>
+          <textarea
+            id="prompt"
+            rows="1"
+            placeholder="Message Claude…"
+            autocomplete="off"
+            autocapitalize="sentences"
+          ></textarea>
+          <button id="send" class="primary send" aria-label="Send">↑</button>
+          <button id="stop" class="danger send" aria-label="Stop" hidden>■</button>
+        </div>
+      </footer>
+    </section>
+
+    <!-- Bottom sheet, reused for the model and mode pickers -->
+    <div id="sheet" class="sheet" hidden>
+      <div class="sheet-panel">
+        <h2 id="sheet-title">Pick one</h2>
+        <div id="sheet-body"></div>
+        <button id="sheet-close" class="ghost wide">Cancel</button>
+      </div>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

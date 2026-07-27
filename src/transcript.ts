@@ -1,0 +1,229 @@
+import path from 'node:path'
+
+import { claudeProjectsDir } from './config.js'
+import { jsonlLines } from './sessions.js'
+
+/**
+ * The wire shape the phone renders. Deliberately flat and small — a raw
+ * transcript entry carries a lot the UI has no use for.
+ */
+export type Block =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; mime: string }
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tool_use'; name: string; summary: string; input?: string }
+  | { kind: 'tool_result'; summary: string; isError: boolean }
+
+export interface RenderedMessage {
+  role: 'user' | 'assistant'
+  blocks: Block[]
+  ts: number | null
+  uuid: string | null
+}
+
+export interface TranscriptPage {
+  messages: RenderedMessage[]
+  /** True when older messages were withheld and can be requested. */
+  hasEarlier: boolean
+  totalMessages: number
+}
+
+/** Entry types that carry no conversational content. */
+const SKIP_TYPES = new Set([
+  'attachment',
+  'ai-title',
+  'last-prompt',
+  'mode',
+  'permission-mode',
+  'file-history-snapshot',
+  'system',
+  'queue-operation',
+])
+
+const MAX_TOOL_INPUT = 600
+const MAX_TOOL_RESULT = 800
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}\n… (${text.length - max} more characters)`
+}
+
+function stringifyInput(input: unknown): string {
+  if (typeof input === 'string') return input
+  try {
+    return JSON.stringify(input, null, 2) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * One-line description of a tool call, chosen per tool so the chip is useful on
+ * a narrow screen rather than showing raw JSON.
+ */
+function summarizeToolUse(name: string, input: unknown): string {
+  const obj = (input ?? {}) as Record<string, unknown>
+  const str = (key: string): string | null => (typeof obj[key] === 'string' ? (obj[key] as string) : null)
+
+  switch (name) {
+    case 'Bash':
+      return str('command') ?? ''
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'NotebookEdit':
+      return str('file_path') ?? str('notebook_path') ?? ''
+    case 'Glob':
+      return str('pattern') ?? ''
+    case 'Grep':
+      return [str('pattern'), str('path')].filter(Boolean).join('  in  ')
+    case 'WebFetch':
+      return str('url') ?? ''
+    case 'WebSearch':
+      return str('query') ?? ''
+    case 'Task':
+    case 'Agent':
+      return str('description') ?? str('subagent_type') ?? ''
+    case 'Skill':
+      return str('skill') ?? ''
+    case 'TodoWrite':
+    case 'TaskCreate':
+      return str('subject') ?? ''
+    default: {
+      const flat = stringifyInput(input).replace(/\s+/g, ' ').trim()
+      return flat.length > 120 ? `${flat.slice(0, 119)}…` : flat
+    }
+  }
+}
+
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return stringifyInput(content)
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = block as { type?: string; text?: unknown }
+    if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
+    else if (b.type === 'image') parts.push('[image]')
+  }
+  return parts.join('\n')
+}
+
+/**
+ * Convert one transcript entry into a renderable message, or null to drop it.
+ *
+ * Also used for live SDK messages, which share the `{type, message}` shape but
+ * carry no `timestamp`.
+ */
+export function convert(entry: Record<string, unknown>): RenderedMessage | null {
+  const type = entry.type
+  if (typeof type !== 'string' || SKIP_TYPES.has(type)) return null
+  if (entry.isSidechain === true) return null
+  if (type !== 'user' && type !== 'assistant') return null
+
+  const message = entry.message as { role?: string; content?: unknown } | undefined
+  if (!message) return null
+
+  const ts = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : null
+  const uuid = typeof entry.uuid === 'string' ? entry.uuid : null
+  const blocks: Block[] = []
+  const content = message.content
+
+  if (typeof content === 'string') {
+    if (content.trim()) blocks.push({ kind: 'text', text: content })
+  } else if (Array.isArray(content)) {
+    for (const raw of content) {
+      if (!raw || typeof raw !== 'object') continue
+      const block = raw as Record<string, unknown>
+      switch (block.type) {
+        case 'text':
+          if (typeof block.text === 'string' && block.text.trim()) {
+            blocks.push({ kind: 'text', text: block.text })
+          }
+          break
+        case 'image': {
+          // The base64 payload is deliberately not forwarded — a phone photo
+          // would add megabytes to every transcript load. A marker is enough.
+          const source = block.source as { media_type?: unknown } | undefined
+          blocks.push({
+            kind: 'image',
+            mime: typeof source?.media_type === 'string' ? source.media_type : 'image',
+          })
+          break
+        }
+
+        case 'thinking':
+          if (typeof block.thinking === 'string' && block.thinking.trim()) {
+            blocks.push({ kind: 'thinking', text: block.thinking })
+          }
+          break
+        case 'tool_use': {
+          const name = typeof block.name === 'string' ? block.name : 'tool'
+          blocks.push({
+            kind: 'tool_use',
+            name,
+            summary: summarizeToolUse(name, block.input),
+            input: clip(stringifyInput(block.input), MAX_TOOL_INPUT),
+          })
+          break
+        }
+        case 'tool_result':
+          blocks.push({
+            kind: 'tool_result',
+            summary: clip(resultText(block.content).trim(), MAX_TOOL_RESULT),
+            isError: block.is_error === true,
+          })
+          break
+        default:
+          break
+      }
+    }
+  }
+
+  if (blocks.length === 0) return null
+
+  // A user entry whose only content is a tool_result is the harness feeding
+  // Claude, not the person typing — render it under the assistant's turn so the
+  // conversation reads as an alternating dialogue.
+  const onlyToolResults = blocks.every((b) => b.kind === 'tool_result')
+  const role: 'user' | 'assistant' = type === 'user' && !onlyToolResults ? 'user' : 'assistant'
+
+  // Drop injected context that the person never typed.
+  if (type === 'user' && !onlyToolResults && entry.isMeta === true) return null
+
+  return { role, blocks, ts, uuid }
+}
+
+/**
+ * Parse a transcript for display.
+ *
+ * `limit` keeps the initial payload small: the biggest transcript on this box is
+ * ~1 MB, which is not something to push to a phone in one response.
+ */
+export async function renderTranscript(
+  file: string,
+  opts: { limit?: number; offsetFromEnd?: number } = {},
+): Promise<TranscriptPage> {
+  const limit = opts.limit ?? 200
+  const offsetFromEnd = opts.offsetFromEnd ?? 0
+
+  const all: RenderedMessage[] = []
+  for await (const entry of jsonlLines(file)) {
+    const message = convert(entry)
+    if (message) all.push(message)
+  }
+
+  const end = Math.max(0, all.length - offsetFromEnd)
+  const start = Math.max(0, end - limit)
+  return {
+    messages: all.slice(start, end),
+    hasEarlier: start > 0,
+    totalMessages: all.length,
+  }
+}
+
+/** Resolve a session id to its transcript path inside a known history directory. */
+export function transcriptPath(historyDir: string, sessionId: string): string | null {
+  // Session ids are UUIDs; refuse anything else so the id can't walk the tree.
+  if (!/^[0-9a-fA-F-]{36}$/.test(sessionId)) return null
+  return path.join(claudeProjectsDir, historyDir, `${sessionId}.jsonl`)
+}

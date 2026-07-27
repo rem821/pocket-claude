@@ -1,0 +1,22 @@
+[Unit]
+Description=pocket-claude (Claude Code web UI over Tailscale)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=__NODE__ __DIR__/dist/server.js
+WorkingDirectory=__DIR__
+EnvironmentFile=__DIR__/.env
+Restart=always
+# The Tailscale address may not exist yet at boot, so the first bind can fail.
+# Restarting on a short delay is what actually gets the service up.
+RestartSec=5
+TimeoutStopSec=30
+SuccessExitStatus=0 143
+KillMode=control-group
+Environment=HOME=__HOME__
+Environment=TMPDIR=/tmp
+Environment=PATH=__PATH__
+
+[Install]
+WantedBy=default.target
