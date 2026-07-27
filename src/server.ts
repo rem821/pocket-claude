@@ -15,6 +15,7 @@ import {
   type OutEvent,
 } from './agent.js'
 import { COOKIE_NAME, config, describeConfig } from './config.js'
+import { originAllowed, SECURITY_HEADERS } from './security.js'
 import {
   BadProjectName,
   createProject,
@@ -61,6 +62,21 @@ app.addContentTypeParser(
     done(null, body)
   },
 )
+
+app.addHook('onRequest', async (request, reply) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    reply.header(name, value)
+  }
+  // Cookie auth plus a state-changing method is the classic CSRF shape.
+  // SameSite=Lax already covers it; this is the belt to that braces.
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !originAllowed(request.headers)) {
+    app.log.warn(
+      { origin: request.headers.origin, url: request.url },
+      'rejected request from disallowed origin',
+    )
+    await reply.code(403).send({ error: 'origin not allowed' })
+  }
+})
 
 function constantTimeEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8')
@@ -114,11 +130,15 @@ app.post<{ Body: { token?: string } }>('/api/login', async (request, reply) => {
     reply.code(401).send({ error: 'bad token' })
     return
   }
+  const flags = [
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=31536000',
+    ...(config.cookieSecure ? ['Secure'] : []),
+  ].join('; ')
   reply
-    .header(
-      'set-cookie',
-      `${COOKIE_NAME}=${encodeURIComponent(config.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
-    )
+    .header('set-cookie', `${COOKIE_NAME}=${encodeURIComponent(config.token)}; ${flags}`)
     .send({ ok: true })
 })
 
@@ -266,7 +286,12 @@ app.post<{ Params: { id: string } }>('/api/projects/:id/close', async (request, 
 
 // ------------------------------------------------------------------- websocket
 
-const wss = new WebSocketServer({ noServer: true })
+const wss = new WebSocketServer({
+  noServer: true,
+  // Prompts are text; attachments go over HTTP. `ws` defaults to 100 MiB, which
+  // lets one authenticated client push the process into swap.
+  maxPayload: 1024 * 1024,
+})
 
 interface ClientMessage {
   t?: string
@@ -320,7 +345,14 @@ async function handleSocket(socket: WebSocket, url: URL): Promise<void> {
     await closeRunner(project)
   }
 
-  const runner = openRunner(project, wanted ?? getRunner(project)?.sessionId ?? null)
+  let runner
+  try {
+    runner = openRunner(project, wanted ?? getRunner(project)?.sessionId ?? null)
+  } catch (err) {
+    send({ t: 'error', message: err instanceof Error ? err.message : 'Could not open that.' })
+    socket.close(4001, 'at capacity')
+    return
+  }
   // attach() sends the session id, current busy state, and any permission
   // request still waiting on an answer.
   const detach = runner.attach(send)
@@ -339,7 +371,7 @@ async function handleSocket(socket: WebSocket, url: URL): Promise<void> {
           ? msg.attachments.filter((a): a is string => typeof a === 'string')
           : []
         if (!text && ids.length === 0) return
-        const attachments = takeAttachments(ids)
+        const attachments = takeAttachments(project.id, ids)
         // Images are read off disk and inlined as base64 here, so this is async.
         void buildContent(text, attachments)
           .then((content) => {
@@ -460,6 +492,15 @@ app.server.on('upgrade', (request, rawSocket, head) => {
 
   if (!isAuthed(request.headers.cookie)) {
     destroy('401 Unauthorized')
+    return
+  }
+
+  // A foreign page must not be able to open this socket even if it somehow has
+  // the cookie attached — the socket can send prompts, and in bypassPermissions
+  // mode those run without asking.
+  if (!originAllowed(request.headers)) {
+    app.log.warn({ origin: request.headers.origin }, 'rejected websocket from disallowed origin')
+    destroy('403 Forbidden')
     return
   }
 

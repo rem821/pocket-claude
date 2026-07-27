@@ -547,10 +547,31 @@ export function getRunner(project: Project): Runner | undefined {
   return runners.get(runnerKey(project.id))
 }
 
+export class TooManyRunners extends Error {}
+
 export function openRunner(project: Project, sessionId: string | null): Runner {
   const key = runnerKey(project.id)
   const existing = runners.get(key)
   if (existing) return existing
+
+  // Each runner is a claude subprocess. Without a ceiling, opening conversations
+  // across many projects (or just tapping the model chip in each) can spawn one
+  // per project and exhaust memory.
+  if (runners.size >= config.maxRunners) {
+    for (const [otherKey, other] of runners) {
+      if (other.clientCount === 0 && !other.busy && other.pendingCount === 0) {
+        runners.delete(otherKey)
+        void other.dispose()
+        break
+      }
+    }
+  }
+  if (runners.size >= config.maxRunners) {
+    throw new TooManyRunners(
+      `${config.maxRunners} conversations are already open and busy. Close one and try again.`,
+    )
+  }
+
   const runner = new Runner(project, sessionId)
   runner.setReapHandler(() => {
     // Only drop it if this is still the registered runner for the project.

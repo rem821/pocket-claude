@@ -141,6 +141,25 @@ export const config = {
   claudeBin: resolveClaudeBin(),
   /** Also list projects with Claude history that live outside PROJECTS_ROOT. */
   includeExternalHistory: /^(1|true|yes)$/i.test(process.env.INCLUDE_EXTERNAL_HISTORY ?? ''),
+  /**
+   * Extra browser origins allowed to open a WebSocket or POST.
+   *
+   * Same-origin is always allowed. Add entries only if you front the app with a
+   * reverse proxy on a different hostname.
+   */
+  allowedOrigins: (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim().toLowerCase())
+    .filter(Boolean),
+  /** Set when served over HTTPS (e.g. behind `tailscale serve`). */
+  cookieSecure: /^(1|true|yes)$/i.test(process.env.COOKIE_SECURE ?? ''),
+  /** Concurrent conversations, each of which is a claude subprocess. */
+  maxRunners: Math.max(1, Number(process.env.MAX_RUNNERS ?? 8)),
+  /** Total bytes of uploads kept per project. */
+  uploadQuotaBytes: Math.max(
+    1024 * 1024,
+    Number(process.env.UPLOAD_QUOTA_BYTES ?? 256 * 1024 * 1024),
+  ),
 } as const
 
 /** One line at startup so a misconfigured install is obvious immediately. */

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
+import { config } from './config.js'
 import type { Project } from './projects.js'
 
 /** Hard cap per file. A phone photo is a few MB; anything far past that is a mistake. */
@@ -14,6 +15,8 @@ const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp
 
 export interface Attachment {
   id: string
+  /** The project this was uploaded to. Ids are only usable within it. */
+  projectId: string
   name: string
   mime: string
   size: number
@@ -82,6 +85,8 @@ export async function saveUpload(
     throw new Error(`That file is larger than ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB.`)
   }
 
+  await enforceQuota(project, body.length)
+
   const dir = uploadDir(project)
   const name = safeName(rawName)
   const target = path.join(dir, `${stamp()}-${name}`)
@@ -97,6 +102,7 @@ export async function saveUpload(
 
   const attachment: Attachment = {
     id: randomUUID(),
+    projectId: project.id,
     name,
     mime: mime || 'application/octet-stream',
     size: body.length,
@@ -109,17 +115,71 @@ export async function saveUpload(
   return attachment
 }
 
-export function getAttachment(id: string): Attachment | undefined {
-  return registry.get(id)
-}
-
-export function takeAttachments(ids: string[]): Attachment[] {
+/**
+ * Resolve ids to attachments, scoped to one project and consumed on use.
+ *
+ * Scoping matters because ids are looked up in a single process-wide registry:
+ * without the project check, a prompt in one project could reference a file
+ * uploaded to another, pulling its path (and, for images, its content) into the
+ * wrong conversation. Consuming them stops an id being replayed into an
+ * unbounded number of later prompts.
+ */
+export function takeAttachments(projectId: string, ids: string[]): Attachment[] {
   const out: Attachment[] = []
   for (const id of ids) {
     const found = registry.get(id)
-    if (found) out.push(found)
+    if (!found || found.projectId !== projectId) continue
+    registry.delete(id)
+    created.delete(id)
+    out.push(found)
   }
   return out
+}
+
+/**
+ * Keep a project's upload directory under the configured budget.
+ *
+ * Files are kept after sending (so they can be read again), which means without a
+ * ceiling an authenticated client can fill the disk one 20 MB upload at a time.
+ * Oldest-first deletion keeps recent context available.
+ */
+async function enforceQuota(project: Project, incoming: number): Promise<void> {
+  const dir = uploadDir(project)
+  let entries: string[]
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return // no directory yet, nothing to prune
+  }
+
+  const stats: { file: string; size: number; mtime: number }[] = []
+  for (const entry of entries) {
+    const file = path.join(dir, entry)
+    try {
+      const info = await stat(file)
+      if (info.isFile()) stats.push({ file, size: info.size, mtime: info.mtimeMs })
+    } catch {
+      // vanished underneath us; ignore
+    }
+  }
+
+  let total = stats.reduce((sum, s) => sum + s.size, 0) + incoming
+  if (total <= config.uploadQuotaBytes) return
+
+  stats.sort((a, b) => a.mtime - b.mtime)
+  for (const candidate of stats) {
+    if (total <= config.uploadQuotaBytes) break
+    try {
+      await unlink(candidate.file)
+      total -= candidate.size
+    } catch {
+      // leave it; the next upload will try again
+    }
+  }
+
+  if (total > config.uploadQuotaBytes) {
+    throw new Error('Upload directory is over its size budget and could not be pruned.')
+  }
 }
 
 /**

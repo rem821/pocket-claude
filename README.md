@@ -136,6 +136,10 @@ All via `.env` (or real environment variables, which take precedence).
 | `CLAUDE_HOME` | `~/.claude` | Where Claude Code keeps transcripts |
 | `CLAUDE_BIN` | auto-detected | The `claude` binary to spawn |
 | `INCLUDE_EXTERNAL_HISTORY` | `false` | Also list projects with history outside `PROJECTS_ROOT` |
+| `MAX_RUNNERS` | `8` | Concurrent conversations (each is a `claude` subprocess) |
+| `UPLOAD_QUOTA_BYTES` | `256 MB` | Per-project upload budget; oldest pruned first |
+| `ALLOWED_ORIGINS` | *(empty)* | Extra browser origins allowed to connect |
+| `COOKIE_SECURE` | `false` | Add `Secure` to the cookie — set when serving over HTTPS |
 | `LOG_LEVEL` | `info` | `fatal` … `trace` |
 
 `HOST=auto` runs `tailscale ip -4` at startup. Binding the tailnet address
@@ -149,11 +153,28 @@ Anyone on your tailnet who has it can make Claude run commands as you. Treat it
 like an SSH key: long, unique, not shared, rotated if it leaks (change
 `POCKET_TOKEN` and restart — every device then re-enters it).
 
+What is in place:
+
+- **Origin enforcement.** A browser request carrying a foreign `Origin` is refused
+  on the WebSocket upgrade and on every state-changing HTTP method. Without this,
+  `SameSite=Lax` declining to attach the cookie is the *only* thing standing
+  between an arbitrary web page and code execution on your machine.
+- **A strict CSP** (`default-src 'none'` with each need enumerated), plus
+  `nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
+- **Caps** on concurrent runners, per-project upload bytes, and WebSocket frame
+  size (1 MiB — attachments go over HTTP, not the socket).
+- **Attachment ids are scoped to their project and consumed on use**, so one
+  cannot be replayed or pulled into a different conversation.
+
 Other things worth knowing:
 
-- The cookie is `HttpOnly` and `SameSite=Lax`, but **not** `Secure`, because the
-  default transport is plain HTTP over the tailnet. A tailnet is a private network,
+- The cookie is `HttpOnly` and `SameSite=Lax`, but **not** `Secure` by default,
+  because the default transport is plain HTTP over the tailnet. Set
+  `COOKIE_SECURE=true` when serving over HTTPS. A tailnet is a private network,
   not an encrypted-in-transit guarantee for the last hop.
+- **Login is not rate-limited.** A wrong token costs the attacker 750 ms, but that
+  delay is per-request and parallelises freely. The default 48-hex-character token
+  makes guessing infeasible; a short one you chose yourself does not.
 - `Auto` mode (`bypassPermissions`) means anything Claude decides to do just runs,
   unattended, while your phone is in your pocket. The chip turns red for a reason.
 - Uploaded files land in `<project>/.pocket-uploads/`, so they will appear in
@@ -171,12 +192,18 @@ If you enable **HTTPS Certificates** for your tailnet, you can put it behind
 HOST=127.0.0.1
 ```
 
+```ini
+# in .env
+HOST=127.0.0.1
+COOKIE_SECURE=true
+```
+
 ```bash
 tailscale serve --bg --https=443 http://127.0.0.1:7420
 ```
 
-Then add `Secure;` to the cookie in `src/server.ts`. This is also what unlocks
-service-worker/offline behaviour, which plain HTTP disallows.
+This is also what unlocks service-worker/offline behaviour, which plain HTTP
+disallows.
 
 ## How it works
 
