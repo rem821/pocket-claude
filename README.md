@@ -175,6 +175,14 @@ Other things worth knowing:
 - **Login is not rate-limited.** A wrong token costs the attacker 750 ms, but that
   delay is per-request and parallelises freely. The default 48-hex-character token
   makes guessing infeasible; a short one you chose yourself does not.
+- **`npm audit` reports three moderate advisories, all from one transitive
+  package.** They trace to
+  `@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → @hono/node-server`,
+  and the underlying issue is a path traversal in Hono's `serve-static` **on
+  Windows** via an encoded backslash. Nothing here imports Hono or serves static
+  files through it. `npm audit fix --force` "fixes" it by downgrading the Agent SDK
+  by a major version, which is worse — so it is knowingly accepted rather than
+  silenced.
 - `Auto` mode (`bypassPermissions`) means anything Claude decides to do just runs,
   unattended, while your phone is in your pocket. The chip turns red for a reason.
 - Uploaded files land in `<project>/.pocket-uploads/`, so they will appear in
