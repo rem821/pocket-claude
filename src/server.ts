@@ -9,6 +9,7 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import {
   closeRunner,
   getRunner,
+  isEffortLevel,
   isPermissionMode,
   openRunner,
   shutdownRunners,
@@ -293,6 +294,29 @@ const wss = new WebSocketServer({
   maxPayload: 1024 * 1024,
 })
 
+/**
+ * Heartbeat.
+ *
+ * A phone whose screen goes off usually vanishes without a TCP close, leaving
+ * a socket that looks open indefinitely: the runner believes someone is still
+ * watching, and every streamed token is buffered into the void. Browsers
+ * answer pings by themselves, so a socket that misses one is dead and gets
+ * dropped. Dropping it only detaches the phone — the run carries on, and the
+ * phone catches up from the transcript when it reconnects.
+ */
+const HEARTBEAT_MS = 30_000
+const alive = new WeakMap<WebSocket, boolean>()
+setInterval(() => {
+  for (const socket of wss.clients) {
+    if (alive.get(socket) === false) {
+      socket.terminate()
+      continue
+    }
+    alive.set(socket, false)
+    socket.ping()
+  }
+}, HEARTBEAT_MS).unref()
+
 interface ClientMessage {
   t?: string
   text?: string
@@ -301,6 +325,7 @@ interface ClientMessage {
   answers?: unknown[]
   mode?: string
   model?: string
+  level?: string
   attachments?: unknown[]
 }
 
@@ -328,7 +353,8 @@ async function handleSocket(socket: WebSocket, url: URL): Promise<void> {
     // on another session is not a conflict — hand it over instead of refusing,
     // which previously made a second conversation in the same project
     // permanently unopenable.
-    if (existing.busy || existing.pendingCount > 0) {
+    // Background tasks count: closing the runner would kill them.
+    if (existing.active) {
       send({
         t: 'error',
         message: `${project.name} is busy with another conversation. Wait for it to finish, or open that one instead.`,
@@ -396,12 +422,17 @@ async function handleSocket(socket: WebSocket, url: URL): Promise<void> {
           send({ t: 'notice', message: 'That tap did not come through — try again.' })
           return
         }
+        const mode = isPermissionMode(msg.mode) ? msg.mode : undefined
+        const accepted = runner.decide(msg.id, msg.decision, mode)
         app.log.info(
-          { permId: msg.id, decision: msg.decision, project: project.name },
+          { permId: msg.id, decision: msg.decision, mode, accepted, project: project.name },
           'permission decision from phone',
         )
-        if (!runner.decide(msg.id, msg.decision)) {
-          send({ t: 'notice', message: 'That permission request already expired.' })
+        if (!accepted) {
+          // Close the card out rather than leave it tappable: the phone is
+          // showing a request this server no longer has.
+          send({ t: 'permission_resolved', id: msg.id, decision: 'expired' })
+          send({ t: 'notice', message: 'That request was already settled.' })
         }
         break
       }
@@ -421,7 +452,8 @@ async function handleSocket(socket: WebSocket, url: URL): Promise<void> {
           'question answered from phone',
         )
         if (!runner.answer(msg.id, answers)) {
-          send({ t: 'notice', message: 'That question already expired.' })
+          send({ t: 'permission_resolved', id: msg.id, decision: 'expired' })
+          send({ t: 'notice', message: 'That question was already settled.' })
         }
         break
       }
@@ -474,6 +506,36 @@ async function handleSocket(socket: WebSocket, url: URL): Promise<void> {
         break
       }
 
+      case 'effort': {
+        // Needs a live run, like the model list.
+        void runner
+          .effortInfo()
+          .then((info) => send({ t: 'effortInfo', ...info }))
+          .catch((err: unknown) => {
+            send({
+              t: 'error',
+              message: `Could not read the effort: ${err instanceof Error ? err.message : String(err)}`,
+            })
+          })
+        break
+      }
+
+      case 'setEffort': {
+        if (!isEffortLevel(msg.level)) {
+          send({ t: 'notice', message: 'Unknown effort level.' })
+          return
+        }
+        const level = msg.level
+        void runner.setEffort(level).catch((err: unknown) => {
+          send({
+            t: 'error',
+            message: `Could not set the effort: ${err instanceof Error ? err.message : String(err)}`,
+          })
+        })
+        app.log.info({ level, project: project.name }, 'effort changed from phone')
+        break
+      }
+
       default:
         break
     }
@@ -511,6 +573,8 @@ app.server.on('upgrade', (request, rawSocket, head) => {
   }
 
   wss.handleUpgrade(request, rawSocket, head, (socket) => {
+    alive.set(socket, true)
+    socket.on('pong', () => alive.set(socket, true))
     void handleSocket(socket, url).catch((err: unknown) => {
       app.log.error({ err }, 'websocket handler failed')
       socket.close(1011, 'internal error')

@@ -700,3 +700,26 @@ details.chip.think .chip-name {
 .notice.bad {
   color: var(--danger);
 }
+
+/* ExitPlanMode approval: four choices read better stacked than squeezed. */
+.perm-actions.stack {
+  flex-direction: column;
+}
+.perm-actions button:disabled {
+  opacity: 0.5;
+}
+.perm .plan {
+  max-height: 50vh;
+  overflow-y: auto;
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.perm p.muted {
+  margin: 0 0 8px;
+}
+
+/* Harness events (background task done, compaction, command output). */
+details.chip.note .chip-name {
+  color: var(--muted);
+  font-weight: 500;
+}

@@ -13,6 +13,8 @@ export type Block =
   | { kind: 'thinking'; text: string }
   | { kind: 'tool_use'; name: string; summary: string; input?: string }
   | { kind: 'tool_result'; summary: string; isError: boolean }
+  /** A harness event the CLI shows as a status line rather than a message. */
+  | { kind: 'note'; label: string; summary: string; detail?: string; isError?: boolean }
 
 export interface RenderedMessage {
   role: 'user' | 'assistant'
@@ -108,6 +110,110 @@ function resultText(content: unknown): string {
   return parts.join('\n')
 }
 
+const MAX_NOTE_DETAIL = 4000
+
+function tag(text: string, name: string): string | null {
+  // Attributes allowed: `<agent-message from="…">`.
+  const match = new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`).exec(text)
+  return match ? match[1]!.trim() : null
+}
+
+function firstLine(text: string): string {
+  const line = text.trim().split('\n')[0] ?? ''
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line
+}
+
+function note(label: string, summary: string, detail?: string, isError = false): Block {
+  return {
+    kind: 'note',
+    label,
+    summary,
+    ...(detail ? { detail: clip(detail, MAX_NOTE_DETAIL) } : {}),
+    ...(isError ? { isError } : {}),
+  }
+}
+
+/**
+ * User entries the person never typed.
+ *
+ * Current CLIs put a lot through the user role — background task results,
+ * compaction summaries, slash commands and `!` shell runs, messages from other
+ * sessions — mostly wrapped in XML-ish tags. Rendered as-is they show up as
+ * raw markup in a bubble that looks as if you had sent it. The CLI shows them
+ * as status lines; so does this.
+ *
+ * Returns undefined when the entry is ordinary input, null to drop it.
+ */
+function harnessUserEntry(
+  entry: Record<string, unknown>,
+  content: unknown,
+  ts: number | null,
+  uuid: string | null,
+): RenderedMessage | null | undefined {
+  let text: string
+  if (typeof content === 'string') text = content
+  else if (Array.isArray(content)) {
+    if (content.some((b) => (b as { type?: unknown } | null)?.type === 'tool_result')) return undefined
+    text = content
+      .map((b) => {
+        const block = b as { type?: unknown; text?: unknown } | null
+        return block?.type === 'text' && typeof block.text === 'string' ? block.text : ''
+      })
+      .join('\n')
+  } else return undefined
+
+  const as = (role: 'user' | 'assistant', block: Block): RenderedMessage => ({
+    role,
+    blocks: [block],
+    ts,
+    uuid,
+  })
+  const origin = (entry.origin ?? null) as { kind?: unknown } | null
+  const trimmed = text.trimStart()
+
+  if (origin?.kind === 'task-notification' || trimmed.startsWith('<task-notification>')) {
+    const status = tag(text, 'status') ?? 'done'
+    const summary = tag(text, 'summary') ?? `Background task ${status}`
+    const result = tag(text, 'result') ?? undefined
+    return as('assistant', note('background', summary, result, status === 'failed'))
+  }
+  if (entry.isCompactSummary === true) {
+    return as('assistant', note('compacted', 'Earlier conversation summarized', text))
+  }
+  if (origin?.kind === 'peer') {
+    const body = tag(text, 'agent-message') ?? text
+    const report = body.replace(/^\[Subagent hand-back\][^\n]*\n?/, '').trim()
+    return as('assistant', note('agent report', firstLine(report) || 'Report from a subagent', report))
+  }
+  if (typeof origin?.kind === 'string' && origin.kind !== 'human') {
+    return as('assistant', note(origin.kind, firstLine(text.replace(/<[^>]+>/g, ' ')), text))
+  }
+  if (trimmed.startsWith('<local-command-caveat>')) return null
+  if (/^(<command-message>|<command-name>)/.test(trimmed)) {
+    const name = tag(text, 'command-name') ?? tag(text, 'command-message') ?? ''
+    const args = tag(text, 'command-args') ?? ''
+    const command = `${name.startsWith('/') ? '' : '/'}${name}${args ? ` ${args}` : ''}`
+    return as('user', { kind: 'text', text: command })
+  }
+  if (trimmed.startsWith('<local-command-stdout>') || trimmed.startsWith('<local-command-stderr>')) {
+    const out = tag(text, 'local-command-stdout') ?? ''
+    const err = tag(text, 'local-command-stderr') ?? ''
+    const body = [out, err].filter(Boolean).join('\n')
+    if (!body) return null
+    return as('assistant', note('output', firstLine(body), body, !out && !!err))
+  }
+  if (trimmed.startsWith('<bash-input>')) {
+    return as('user', { kind: 'text', text: `! ${tag(text, 'bash-input') ?? ''}` })
+  }
+  if (trimmed.startsWith('<bash-stdout>') || trimmed.startsWith('<bash-stderr>')) {
+    const out = tag(text, 'bash-stdout') ?? ''
+    const err = tag(text, 'bash-stderr') ?? ''
+    const body = [out, err].filter(Boolean).join('\n')
+    return as('assistant', note('shell', firstLine(body) || '(no output)', body || undefined, !out && !!err))
+  }
+  return undefined
+}
+
 /**
  * Convert one transcript entry into a renderable message, or null to drop it.
  *
@@ -127,6 +233,15 @@ export function convert(entry: Record<string, unknown>): RenderedMessage | null 
   const uuid = typeof entry.uuid === 'string' ? entry.uuid : null
   const blocks: Block[] = []
   const content = message.content
+
+  // isMeta entries are left to the filter below, which drops them — except a
+  // subagent's hand-back report, which is meta but is the agent's actual
+  // answer; the background-task note points at it.
+  const fromPeer = (entry.origin as { kind?: unknown } | undefined)?.kind === 'peer'
+  if (type === 'user' && (entry.isMeta !== true || fromPeer)) {
+    const special = harnessUserEntry(entry, content, ts, uuid)
+    if (special !== undefined) return special
+  }
 
   if (typeof content === 'string') {
     if (content.trim()) blocks.push({ kind: 'text', text: content })

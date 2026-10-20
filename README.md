@@ -50,16 +50,31 @@ rather than assuming self-hosting the UI satisfies them.
   counter, and the name of the tool currently running.
 - **Permission prompts on the phone** — when Claude wants to run Bash or edit a
   file, an Allow/Deny card appears and the run blocks until you tap.
-- **Permission modes** — `Ask`, `Auto-edit`, `Auto`, and **plan mode**, switchable
-  mid-conversation.
+- **Permission modes** — the CLI's set, in its Shift+Tab order: `Ask`, `Auto-edit`,
+  `Plan`, `Auto` (the classifier-driven auto mode) and `Bypass`, switchable
+  mid-conversation. A new conversation starts in whatever
+  `permissions.defaultMode` your settings say, exactly like `claude` in a terminal.
+- **Plan approval** — when Claude leaves plan mode you get the plan and the CLI's
+  choices: continue in auto mode, auto-accept edits, approve edits manually, or
+  keep planning.
 - **Model switcher** — pick between the models your account has.
+- **Effort** — the `effort:` chip works like `/effort`: the levels the current
+  model supports, applied from the next request and saved as that model's default
+  (`max` stays session-only). The chip shows what the CLI will really send, so a
+  typed `/effort` or a model switch is reflected too.
 - **Slash commands** — type `/` for a filterable list of everything your install
   offers, including your own project commands and skills.
 - **Questions** — `AskUserQuestion` renders as tappable options.
 - **Attachments** — photos and files from the camera, gallery or Files app. Images
   are sent as real vision input; other files are saved and read with the Read tool.
 - **Survives interruptions** — lock your phone mid-turn; the work continues on the
-  desktop and the transcript is re-read when you come back.
+  desktop, including background subagents and shells, and the transcript is
+  re-read when you come back. A request that needs a tap waits for you (up to 24
+  hours) instead of being denied. If the browser discarded the tab meanwhile, the
+  URL brings you straight back to the same conversation.
+- **Background work** — the status line counts running background tasks, and their
+  results, compactions, slash-command output and subagent reports show as compact
+  notes the way the CLI shows them, not as raw tags.
 
 Add it to your home screen for an app-like launcher.
 
@@ -175,16 +190,14 @@ Other things worth knowing:
 - **Login is not rate-limited.** A wrong token costs the attacker 750 ms, but that
   delay is per-request and parallelises freely. The default 48-hex-character token
   makes guessing infeasible; a short one you chose yourself does not.
-- **`npm audit` reports three moderate advisories, all from one transitive
-  package.** They trace to
-  `@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → @hono/node-server`,
-  and the underlying issue is a path traversal in Hono's `serve-static` **on
-  Windows** via an encoded backslash. Nothing here imports Hono or serves static
-  files through it. `npm audit fix --force` "fixes" it by downgrading the Agent SDK
-  by a major version, which is worse — so it is knowingly accepted rather than
-  silenced.
-- `Auto` mode (`bypassPermissions`) means anything Claude decides to do just runs,
-  unattended, while your phone is in your pocket. The chip turns red for a reason.
+- **Keep dependencies current.** `npm audit` was clean as of Agent SDK 0.3.304 /
+  fastify 5.12.7. Prefer `npm update` and plain `npm audit fix`; `--force` tends to
+  "fix" things by downgrading the Agent SDK, which is worse.
+- `Auto` is Claude Code's auto mode: a classifier approves routine actions and
+  blocks risky ones, and you are asked only when it can't decide. `Bypass`
+  (`bypassPermissions`) has no classifier at all — anything Claude decides to do
+  just runs, unattended, while your phone is in your pocket. That chip turns red
+  for a reason.
 - Uploaded files land in `<project>/.pocket-uploads/`, so they will appear in
   `git status`. Add that path to your `.gitignore` if it bothers you.
 - Your tailnet ACLs still apply. If other people's devices are on your tailnet,
@@ -261,12 +274,11 @@ debug. Unknown values are logged and ignored, leaving the card live to tap again
   the same transcript and race. A second connection takes over an idle runner and
   is refused only if the first is genuinely mid-turn.
 - **Idle runners are reaped after two minutes** with no client attached, so browsing
-  projects doesn't leave a pile of `claude` subprocesses. A turn in flight is never
-  reaped — finishing while you're away is the point.
-- **`AskUserQuestion` answers ride back on a tool-deny message.** `canUseTool` can
-  allow or deny but cannot return a tool *result*, so the chosen options are
-  delivered in the denial text, phrased for Claude to treat as the answer. It works,
-  but it is a workaround.
+  projects doesn't leave a pile of `claude` subprocesses. A turn in flight, a
+  request waiting on a tap, and running background tasks are never reaped —
+  finishing while you're away is the point.
+- **Dead sockets are dropped by a 30-second heartbeat.** A phone that goes dark
+  rarely closes its socket; the ping notices, detaches it, and the run carries on.
 - **Sent images render as a marker, not a thumbnail.** The base64 stays server-side;
   echoing it would add megabytes to every transcript load over a phone connection.
 
