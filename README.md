@@ -48,6 +48,12 @@ rather than assuming self-hosting the UI satisfies them.
   from the transcript, newest first. Resume one or start a new one.
 - **Streaming** — replies arrive token by token, with a spinner, a live elapsed
   counter, and the name of the tool currently running.
+- **Compact activity** — like the CLI, a run of tool calls between two pieces of
+  text collapses into one line ("Read 3 files, ran 2 commands, edited 1 file"),
+  with failures called out. Tap to expand: each call is one row with its result
+  (✓ / ✕ / … while running); shell commands are labelled by their description and
+  show the exact command and output when opened. Answered permission cards fade
+  once the call's row has taken over.
 - **Permission prompts on the phone** — when Claude wants to run Bash or edit a
   file, an Allow/Deny card appears and the run blocks until you tap.
 - **Permission modes** — the CLI's set, in its Shift+Tab order: `Ask`, `Auto-edit`,

@@ -723,3 +723,111 @@ details.chip.note .chip-name {
   color: var(--muted);
   font-weight: 500;
 }
+
+/* ---------------------------------------------------------- activity groups */
+/* A run of tool calls between two pieces of text, collapsed like the CLI does. */
+.msg.activity {
+  display: block;
+  margin-bottom: 10px;
+}
+.group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  font-size: 13.5px;
+  text-align: left;
+}
+.group-head::before {
+  content: '▸';
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.activity.open .group-head::before {
+  content: '▾';
+}
+.group-sum {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-state {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.group-state.bad {
+  color: var(--danger);
+}
+/* One tool call (plus any thinking) shows its rows directly — no summary. */
+.activity.flat .group-head {
+  display: none;
+}
+.activity:not(.flat):not(.open) .group-items {
+  display: none;
+}
+.activity.open:not(.flat) .group-items {
+  margin: 6px 0 0 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+}
+.group-items > details.chip {
+  margin-bottom: 6px;
+}
+.group-items > details.chip:last-child {
+  margin-bottom: 0;
+}
+.item-mark {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--ok);
+}
+details.chip.item.err .item-mark {
+  color: var(--danger);
+}
+details.chip.item[data-state='running'] .item-mark {
+  color: var(--muted);
+}
+details.chip pre.item-in {
+  color: var(--muted);
+}
+
+/* Answered cards fade once the call's own row has taken over. */
+.perm.fade {
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+/* Expanded rows wrap: sideways scrolling a command's output on a phone is no fun. */
+details.chip pre.item-in,
+details.chip pre.item-out {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+/* A call's own description reads as prose, not code. */
+.chip-sum.titled {
+  font-family: inherit;
+  font-size: 13px;
+}
+/* Thinking between calls: a slim, muted line you can tap, not a full row. */
+.group-items > details.chip.think {
+  background: transparent;
+  border: 0;
+  margin-bottom: 2px;
+}
+.group-items > details.chip.think > summary {
+  padding: 2px 11px;
+  font-size: 12px;
+}
+.group-items > details.chip.think > summary .chip-name::before {
+  content: '✻ ';
+}
+.group-items > details.chip.think[open] {
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+}

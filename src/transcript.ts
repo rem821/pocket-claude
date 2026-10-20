@@ -11,8 +11,10 @@ export type Block =
   | { kind: 'text'; text: string }
   | { kind: 'image'; mime: string }
   | { kind: 'thinking'; text: string }
-  | { kind: 'tool_use'; name: string; summary: string; input?: string }
-  | { kind: 'tool_result'; summary: string; isError: boolean }
+  /** `title`: the call's own plain-language description (Bash has one), for the row label. */
+  | { kind: 'tool_use'; name: string; summary: string; input?: string; id?: string; title?: string }
+  /** `toolUseId` pairs a result with its call, so the phone can show them as one row. */
+  | { kind: 'tool_result'; summary: string; isError: boolean; toolUseId?: string }
   /** A harness event the CLI shows as a status line rather than a message. */
   | { kind: 'note'; label: string; summary: string; detail?: string; isError?: boolean }
 
@@ -95,6 +97,13 @@ function summarizeToolUse(name: string, input: unknown): string {
       return flat.length > 120 ? `${flat.slice(0, 119)}…` : flat
     }
   }
+}
+
+/** Bash and PowerShell calls describe themselves; that reads better on a phone than the command. */
+function toolTitle(name: string, input: unknown): string | null {
+  if (name !== 'Bash' && name !== 'PowerShell') return null
+  const description = (input as { description?: unknown } | null)?.description
+  return typeof description === 'string' && description.trim() ? description.trim() : null
 }
 
 function resultText(content: unknown): string {
@@ -278,6 +287,8 @@ export function convert(entry: Record<string, unknown>): RenderedMessage | null 
             name,
             summary: summarizeToolUse(name, block.input),
             input: clip(stringifyInput(block.input), MAX_TOOL_INPUT),
+            ...(typeof block.id === 'string' ? { id: block.id } : {}),
+            ...(toolTitle(name, block.input) ? { title: toolTitle(name, block.input)! } : {}),
           })
           break
         }
@@ -286,6 +297,7 @@ export function convert(entry: Record<string, unknown>): RenderedMessage | null 
             kind: 'tool_result',
             summary: clip(resultText(block.content).trim(), MAX_TOOL_RESULT),
             isError: block.is_error === true,
+            ...(typeof block.tool_use_id === 'string' ? { toolUseId: block.tool_use_id } : {}),
           })
           break
         default:

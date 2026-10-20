@@ -295,86 +295,280 @@ function blockToNode(block) {
     span.textContent = `🖼 image sent (${block.mime})`
     return span
   }
-  if (block.kind === 'thinking') {
-    const details = document.createElement('details')
-    details.className = 'chip think'
-    const summary = document.createElement('summary')
-    const name = document.createElement('span')
-    name.className = 'chip-name'
-    name.textContent = 'thinking'
-    summary.append(name)
-    const pre = document.createElement('pre')
-    pre.textContent = block.text
-    details.append(summary, pre)
-    return details
-  }
-  if (block.kind === 'tool_use') {
-    const details = document.createElement('details')
-    details.className = 'chip'
-    const summary = document.createElement('summary')
-    const name = document.createElement('span')
-    name.className = 'chip-name'
-    name.textContent = block.name
-    const sum = document.createElement('span')
-    sum.className = 'chip-sum'
-    sum.textContent = block.summary || ''
-    summary.append(name, sum)
-    details.append(summary)
-    if (block.input) {
-      const pre = document.createElement('pre')
-      pre.textContent = block.input
-      details.append(pre)
-    }
-    return details
-  }
   if (block.kind === 'note') {
     // Harness events the CLI shows as a status line, not as something typed:
     // background task results, compaction, slash-command output.
     const details = document.createElement('details')
     details.className = block.isError ? 'chip note err' : 'chip note'
     const summary = document.createElement('summary')
-    const name = document.createElement('span')
-    name.className = 'chip-name'
-    name.textContent = block.label
-    const sum = document.createElement('span')
-    sum.className = 'chip-sum'
-    sum.textContent = block.summary || ''
-    summary.append(name, sum)
+    summary.append(span('chip-name', block.label), span('chip-sum', block.summary || ''))
     details.append(summary)
-    if (block.detail) {
-      const pre = document.createElement('pre')
-      pre.textContent = block.detail
-      details.append(pre)
-    }
+    if (block.detail) details.append(pre(block.detail))
     return details
   }
-  // tool_result
-  const details = document.createElement('details')
-  details.className = block.isError ? 'chip err' : 'chip'
-  const summary = document.createElement('summary')
-  const name = document.createElement('span')
-  name.className = 'chip-name'
-  name.textContent = block.isError ? 'error' : 'result'
-  const sum = document.createElement('span')
-  sum.className = 'chip-sum'
-  sum.textContent = (block.summary || '').split('\n')[0]
-  summary.append(name, sum)
-  const pre = document.createElement('pre')
-  pre.textContent = block.summary || ''
-  details.append(summary, pre)
-  return details
+  // Tool calls, results and thinking are activity, rendered by addActivity().
+  return document.createComment(block.kind)
 }
 
-function appendMessage(message, { prepend = false } = {}) {
+function span(className, text) {
+  const el = document.createElement('span')
+  el.className = className
+  el.textContent = text
+  return el
+}
+
+function pre(text, className = '') {
+  const el = document.createElement('pre')
+  if (className) el.className = className
+  el.textContent = text
+  return el
+}
+
+// ------------------------------------------------------------ activity groups
+//
+// The CLI doesn't print each tool call and each result as its own message. A
+// run of activity between two pieces of text collapses into one line — "Read 3
+// files, ran 2 commands" — that expands on demand. Same here:
+//
+//   - a call and its result share one row (✓ / ✕ / … for still running);
+//   - consecutive rows share one group, with thinking folded in;
+//   - text, your own messages and notes end the run;
+//   - a group only collapses behind a summary once it holds two or more tool
+//     calls — "ran 1 command" would hide the one thing worth reading.
+
+const ACTIVITY_KINDS = new Set(['tool_use', 'tool_result', 'thinking'])
+
+/** How a tool is counted in a group summary. `distinct` counts unique targets. */
+function toolCategory(name) {
+  if (name.startsWith('mcp__')) {
+    const server = name.split('__')[1] || 'MCP'
+    return { key: `mcp:${server}`, verb: 'made', noun: `${server} call`, distinct: false }
+  }
+  switch (name) {
+    case 'Read':
+      return { key: 'read', verb: 'read', noun: 'file', distinct: true }
+    case 'Grep':
+    case 'Glob':
+      return { key: 'search', verb: 'searched', noun: 'pattern', distinct: true }
+    case 'Bash':
+    case 'PowerShell':
+      return { key: 'run', verb: 'ran', noun: 'command', distinct: false }
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return { key: 'edit', verb: 'edited', noun: 'file', distinct: true }
+    case 'Write':
+      return { key: 'write', verb: 'wrote', noun: 'file', distinct: true }
+    case 'WebFetch':
+      return { key: 'fetch', verb: 'fetched', noun: 'page', distinct: true }
+    case 'WebSearch':
+      return { key: 'web', verb: 'ran', noun: 'web search', distinct: false }
+    case 'Agent':
+    case 'Task':
+      return { key: 'agent', verb: 'started', noun: 'agent', distinct: false }
+    default:
+      return { key: `tool:${name}`, verb: 'used', noun: null, name, distinct: false }
+  }
+}
+
+/** `mcp__chrome-devtools__click` reads better as `chrome-devtools · click`. */
+function toolLabel(name) {
+  if (!name.startsWith('mcp__')) return name
+  const [, server, ...rest] = name.split('__')
+  return `${server} · ${rest.join('__')}`
+}
+
+function toolItems(wrap) {
+  return wrap.querySelectorAll(':scope .group-items > .item[data-kind="tool"]')
+}
+
+function summarizeGroup(wrap) {
+  const phrases = new Map()
+  let failed = 0
+  let running = 0
+  for (const item of toolItems(wrap)) {
+    const cat = toolCategory(item.dataset.tool)
+    let entry = phrases.get(cat.key)
+    if (!entry) {
+      entry = { cat, targets: new Set(), count: 0 }
+      phrases.set(cat.key, entry)
+    }
+    entry.count++
+    entry.targets.add(item.dataset.target || `#${entry.count}`)
+    if (item.dataset.state === 'err') failed++
+    if (item.dataset.state === 'running') running++
+  }
+  const parts = []
+  for (const { cat, targets, count } of phrases.values()) {
+    const n = cat.distinct ? targets.size : count
+    parts.push(
+      cat.noun ? `${cat.verb} ${n} ${cat.noun}${n === 1 ? '' : 's'}` : `${cat.verb} ${cat.name}${n > 1 ? ` ×${n}` : ''}`,
+    )
+  }
+  const text = parts.join(', ')
+  return { text: text.charAt(0).toUpperCase() + text.slice(1), failed, running }
+}
+
+function updateGroup(wrap) {
+  const tools = toolItems(wrap).length
+  // Collapse behind a summary only when there is something to summarise.
+  wrap.classList.toggle('flat', tools < 2)
+  if (tools < 2) return
+  const { text, failed, running } = summarizeGroup(wrap)
+  wrap.querySelector('.group-sum').textContent = text
+  const stateEl = wrap.querySelector('.group-state')
+  // Like the CLI, no call count — only what needs attention.
+  stateEl.textContent = running ? '…' : failed ? `${failed} failed` : ''
+  stateEl.className = `group-state${failed ? ' bad' : ''}`
+}
+
+/** Elements that sit at the bottom without belonging to the conversation flow. */
+function isTrailing(el) {
+  return el.classList.contains('perm') || el.classList.contains('streaming')
+}
+
+/** The group activity should go into: the last one, unless something has ended it. */
+function openGroup(container) {
+  let last = container.lastElementChild
+  let firstTrailing = null
+  while (last && isTrailing(last)) {
+    firstTrailing = last
+    last = last.previousElementSibling
+  }
+  if (last && last.classList.contains('activity')) return last
+
   const wrap = document.createElement('div')
-  wrap.className = `msg ${message.role}`
-  const bubble = document.createElement('div')
-  bubble.className = 'bubble'
-  for (const block of message.blocks) bubble.append(blockToNode(block))
-  wrap.append(bubble)
-  if (prepend) messagesEl().prepend(wrap)
-  else messagesEl().append(wrap)
+  wrap.className = 'msg assistant activity flat'
+  const group = document.createElement('div')
+  group.className = 'group'
+  const head = document.createElement('button')
+  head.className = 'group-head'
+  head.type = 'button'
+  head.append(span('group-sum', ''), span('group-state', ''))
+  head.addEventListener('click', () => wrap.classList.toggle('open'))
+  const items = document.createElement('div')
+  items.className = 'group-items'
+  group.append(head, items)
+  wrap.append(group)
+  // Cards still waiting for a tap stay at the very bottom, where they are seen.
+  container.insertBefore(wrap, firstTrailing)
   return wrap
+}
+
+/**
+ * Paths read the way the CLI prints them: relative to the project, else with
+ * the home directory as `~`. Display only — counting uses the full path.
+ */
+function shortPaths(text) {
+  const root = state.project?.path
+  let out = text
+  if (root) out = out.split(`${root}/`).join('').split(root).join('.')
+  return out.replace(/(^|[\s'"=(])\/(?:home|Users)\/[^/\s]+(?=\/|\s|$)/g, '$1~')
+}
+
+const FILE_TOOLS = new Set(['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
+
+/**
+ * A long path loses its end to the ellipsis on a phone — exactly the part
+ * that matters. Keep the last few segments instead: `…/pocket-claude/src/agent.ts`.
+ */
+function shortFile(path) {
+  const short = shortPaths(path)
+  if (short.length <= 34) return short
+  const parts = short.split('/')
+  return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : short
+}
+
+function toolRow(name, summaryText, state, title = '') {
+  const item = document.createElement('details')
+  item.className = 'chip item'
+  item.dataset.kind = 'tool'
+  item.dataset.tool = name
+  item.dataset.target = summaryText
+  const summary = document.createElement('summary')
+  const label = span('chip-sum', title || (FILE_TOOLS.has(name) ? shortFile(summaryText) : shortPaths(summaryText)))
+  if (title) label.classList.add('titled')
+  summary.append(span('chip-name', toolLabel(name)), label, span('item-mark', ''))
+  item.append(summary)
+  setRowState(item, state)
+  return item
+}
+
+function setRowState(item, state) {
+  item.dataset.state = state
+  item.classList.toggle('err', state === 'err')
+  item.querySelector('.item-mark').textContent = state === 'ok' ? '✓' : state === 'err' ? '✕' : '…'
+}
+
+function addResult(item, block) {
+  setRowState(item, block.isError ? 'err' : 'ok')
+  if (block.summary) item.append(pre(block.summary, 'item-out'))
+}
+
+/** Put one activity block into the open group of `container`. */
+function addActivity(block, container) {
+  const wrap = openGroup(container)
+  const items = wrap.querySelector('.group-items')
+
+  if (block.kind === 'thinking') {
+    const details = document.createElement('details')
+    details.className = 'chip think item'
+    details.dataset.kind = 'thinking'
+    const summary = document.createElement('summary')
+    summary.append(span('chip-name', 'thinking'))
+    details.append(summary, pre(block.text))
+    items.append(details)
+  } else if (block.kind === 'tool_use') {
+    const item = toolRow(block.name, block.summary || '', 'running', block.title || '')
+    if (block.id) item.dataset.toolId = block.id
+    // A shell call's input is just the command (plus the description already
+    // shown as the label); show it as typed rather than as JSON.
+    const isShell = block.name === 'Bash' || block.name === 'PowerShell'
+    if (isShell && block.summary) item.append(pre(`$ ${block.summary}`, 'item-in'))
+    else if (block.input) item.append(pre(block.input, 'item-in'))
+    items.append(item)
+  } else {
+    // Pair by id; without one (an older server), the oldest call still
+    // waiting is the best guess — results come back in call order.
+    const match =
+      (block.toolUseId && container.querySelector(`.item[data-tool-id="${CSS.escape(block.toolUseId)}"]`)) ||
+      (!block.toolUseId && items.querySelector('.item[data-kind="tool"][data-state="running"]:not([data-tool-id])'))
+    if (match) {
+      addResult(match, block)
+      updateGroup(match.closest('.activity'))
+      return
+    }
+    // A result whose call is on an earlier page, or was never seen.
+    const item = toolRow('result', (block.summary || '').split('\n')[0], 'running')
+    addResult(item, block)
+    items.append(item)
+  }
+  updateGroup(wrap)
+}
+
+/**
+ * Render one message. Activity blocks go into the open group; anything else
+ * goes into a bubble, which also ends the group. `container` defaults to the
+ * live list; loadEarlier() passes a detached one.
+ */
+function appendMessage(message, container = messagesEl()) {
+  let bubble = null
+  for (const block of message.blocks) {
+    if (ACTIVITY_KINDS.has(block.kind)) {
+      bubble = null
+      addActivity(block, container)
+      continue
+    }
+    if (!bubble) {
+      const wrap = document.createElement('div')
+      wrap.className = `msg ${message.role}`
+      bubble = document.createElement('div')
+      bubble.className = 'bubble'
+      wrap.append(bubble)
+      container.append(wrap)
+    }
+    bubble.append(blockToNode(block))
+  }
 }
 
 /** Same order as the CLI's Shift+Tab cycle. */
@@ -697,6 +891,12 @@ function resolvePermissionCard(id, decision) {
           ? '– Skipped'
           : (VERDICTS[decision] ?? decision)
     actions.replaceWith(verdict)
+    // The call's own row now says what happened, and a reload would not show
+    // the card either — so after a moment to read the verdict it goes.
+    setTimeout(() => {
+      card.classList.add('fade')
+      setTimeout(() => card.remove(), 350)
+    }, 1200)
   }
 }
 
@@ -802,9 +1002,11 @@ async function loadEarlier() {
     )
     const scroll = $('chat-scroll')
     const before = scroll.scrollHeight
-    for (const message of [...page.messages].reverse()) {
-      appendMessage(message, { prepend: true })
-    }
+    // Built in a detached list so the page groups like any other, then
+    // moved in above what is already shown.
+    const older = document.createElement('div')
+    for (const message of page.messages) appendMessage(message, older)
+    messagesEl().prepend(...older.children)
     state.earliestOffset += page.messages.length
     button.hidden = !page.hasEarlier
     scroll.scrollTop += scroll.scrollHeight - before
